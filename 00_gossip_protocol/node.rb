@@ -6,7 +6,7 @@ require "sinatra"
 
 Thread.abort_on_exception = true
 
-peers = (ENV["PEERS"] || "").split(",")
+peers = (ENV["PEERS"] || "").split(",").map(&:to_i).compact
 key_pair = OpenSSL::PKey::RSA.new(2048)
 
 $public_key = key_pair.public_key.export
@@ -20,23 +20,18 @@ post "/gossip" do
   public_key = OpenSSL::PKey::RSA.new(Base64.decode64(params["public_key"]))
   decrypted_state = public_key.public_decrypt(Base64.decode64(params["signature"]))
 
-  halt(:forbidden) if decrypted_state != digest(params["state"])
+  # Forbid any payload that has been forged
+  halt(:forbidden) if decrypted_state != digest(params.except("signature"))
 
-  params["state"].each do |identifier, payload|
-    $state[identifier] =
-      if payload["version"] > ($state.dig(identifier, "version") || 0)
-        payload
-      else
-        $state[identifier]
-      end
-  end
+  # Update state and peers
+  update(params)
 
-  $state.to_json
+  # Answer back with own gossip payload so that requester can update it's own peers and state
+  gossip_payload.to_json
 end
 
 # Following endpoints would never exist in a real system
 # Useful just to trigger either updates or debug the node
-
 post "/update" do
   params = JSON.parse(request.body.read)
   encoded_public_key = Base64.encode64($public_key)
@@ -70,13 +65,15 @@ private
 def gossip
   $peers.each do |peer|
     begin
-      HTTParty.post(
-        "http://#{peer}/gossip",
-        {
-          body: gossip_payload.to_json,
-          headers: { "Content-Type" => "application/json" },
-        }
-      )
+      response =
+        HTTParty.post(
+          "http://localhost:#{peer}/gossip",
+          {
+            body: gossip_payload.to_json,
+            headers: { "Content-Type" => "application/json" },
+          }
+        )
+      update(JSON.parse(response))
     rescue Errno::ECONNREFUSED
       $peers.delete(peer)
     end
@@ -84,11 +81,29 @@ def gossip
 end
 
 def gossip_payload
-  {
+  payload = {
+    # Add self to peers
+    "peers" => $peers + [settings.port],
     "public_key" => Base64.encode64($public_key),
     "state" => $state,
-    "signature" => Base64.encode64($private_key.private_encrypt(digest($state)))
   }
+
+  payload.merge("signature" => Base64.encode64($private_key.private_encrypt(digest(payload))))
+end
+
+def update(params)
+  # Update state of node for data that is older than what we currently have
+  params["state"].each do |identifier, payload|
+    $state[identifier] =
+      if payload["version"] > ($state.dig(identifier, "version") || 0)
+        payload
+      else
+        $state[identifier]
+      end
+  end
+
+  # Update peers, dedup and remove self
+  $peers = ($peers + params["peers"]).uniq - [settings.port]
 end
 
 def digest(state)
@@ -96,7 +111,6 @@ def digest(state)
 end
 
 # Gossip every so often
-
 Thread.new do
   loop do
     gossip
