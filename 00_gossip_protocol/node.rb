@@ -113,7 +113,7 @@ end
 # Gossip every so often
 Thread.new do
   loop do
-    gossip
     sleep 3.seconds
+    gossip
   end
 end
