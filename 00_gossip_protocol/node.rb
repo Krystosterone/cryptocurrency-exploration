@@ -17,11 +17,9 @@ $peers = Concurrent::Array.new(peers)
 
 post "/gossip" do
   params = JSON.parse(request.body.read)
-  public_key = OpenSSL::PKey::RSA.new(Base64.decode64(params["public_key"]))
-  decrypted_state = public_key.public_decrypt(Base64.decode64(params["signature"]))
 
-  # Forbid any payload that has been forged
-  halt(:forbidden) if decrypted_state != digest(params.except("signature"))
+  # Forbid any payload that has been forged with
+  return halt(:forbidden) unless valid_payload?(params)
 
   # Update state and peers
   update(params)
@@ -36,18 +34,13 @@ post "/update" do
   params = JSON.parse(request.body.read)
   encoded_public_key = Base64.encode64($public_key)
 
+  payload = {
+    "data" => params["data"],
+    "version" => $state.key?(encoded_public_key) ? $state[encoded_public_key]["version"] + 1 : 1,
+  }
+
   $state[encoded_public_key] =
-    if $state.key?(encoded_public_key)
-      {
-        "data" => params["data"],
-        "version" => $state[encoded_public_key]["version"] + 1,
-      }
-    else
-      {
-        "data" => params["data"],
-        "version" => 1,
-      }
-    end
+    payload.merge("signature" => Base64.encode64($private_key.private_encrypt(digest(payload))))
 
   gossip_payload.to_json
 end
@@ -61,6 +54,20 @@ get "/inspect" do
 end
 
 private
+
+def valid_payload?(params)
+  public_key = OpenSSL::PKey::RSA.new(Base64.decode64(params["public_key"]))
+  decrypted_state = public_key.public_decrypt(Base64.decode64(params["signature"]))
+
+  return false if decrypted_state != digest(params.except("signature"))
+
+  params["state"].all? do |raw_public_key, payload|
+    node_public_key = OpenSSL::PKey::RSA.new(Base64.decode64(raw_public_key))
+    decrypted_payload = node_public_key.public_decrypt(Base64.decode64(payload["signature"]))
+
+    decrypted_payload == digest(payload.except("signature"))
+  end
+end
 
 def gossip
   $peers.each do |peer|
@@ -93,12 +100,12 @@ end
 
 def update(params)
   # Update state of node for data that is older than what we currently have
-  params["state"].each do |identifier, payload|
-    $state[identifier] =
-      if payload["version"] > ($state.dig(identifier, "version") || 0)
+  params["state"].each do |public_key, payload|
+    $state[public_key] =
+      if payload["version"] > ($state.dig(public_key, "version") || 0)
         payload
       else
-        $state[identifier]
+        $state[public_key]
       end
   end
 
