@@ -1,4 +1,5 @@
 require "active_support/all"
+require "byebug"
 require "concurrent"
 require "httparty"
 require "openssl"
@@ -7,22 +8,26 @@ require "sinatra"
 Thread.abort_on_exception = true
 
 peers = (ENV["PEERS"] || "").split(",").map(&:to_i).compact
-key_pair = OpenSSL::PKey::RSA.new(2048)
 
-$public_key = key_pair.public_key.export
-$private_key = key_pair
+$key = OpenSSL::PKey::RSA.new(2048)
+$public_key = $key.public_key.export
 
 $state = Concurrent::Hash.new
 $peers = Concurrent::Array.new(peers)
 
+before do
+  @json_params = JSON.parse(request.body.read) rescue {}
+end
+
 post "/gossip" do
-  params = JSON.parse(request.body.read)
+  # Ensuring all required params are there
+  return halt(400) if missing_params?(%w(peers public_key state signature))
 
   # Forbid any payload that has been forged with
-  return halt(:forbidden) unless valid_payload?(params)
+  return halt(403) unless valid_payload?
 
   # Update state and peers
-  update(params)
+  update
 
   # Answer back with own gossip payload so that requester can update it's own peers and state
   gossip_payload.to_json
@@ -31,16 +36,15 @@ end
 # Following endpoints would never exist in a real system
 # Useful just to trigger either updates or debug the node
 post "/update" do
-  params = JSON.parse(request.body.read)
   encoded_public_key = Base64.encode64($public_key)
 
   payload = {
-    "data" => params["data"],
+    "data" => @json_params["data"],
     "version" => $state.key?(encoded_public_key) ? $state[encoded_public_key]["version"] + 1 : 1,
   }
 
   $state[encoded_public_key] =
-    payload.merge("signature" => Base64.encode64($private_key.private_encrypt(digest(payload))))
+    payload.merge("signature" => Base64.encode64($key.private_encrypt(digest(payload))))
 
   gossip_payload.to_json
 end
@@ -55,18 +59,24 @@ end
 
 private
 
-def valid_payload?(params)
-  public_key = OpenSSL::PKey::RSA.new(Base64.decode64(params["public_key"]))
-  decrypted_state = public_key.public_decrypt(Base64.decode64(params["signature"]))
+def missing_params?(required_params)
+  !required_params.all? { |required_param| required_param.in?(@json_params.keys) }
+end
 
-  return false if decrypted_state != digest(params.except("signature"))
+def valid_payload?
+  public_key = OpenSSL::PKey::RSA.new(Base64.decode64(@json_params["public_key"]))
+  decrypted_state = public_key.public_decrypt(Base64.decode64(@json_params["signature"]))
 
-  params["state"].all? do |raw_public_key, payload|
+  return false if decrypted_state != digest(@json_params.except("signature"))
+
+  @json_params["state"].all? do |raw_public_key, payload|
     node_public_key = OpenSSL::PKey::RSA.new(Base64.decode64(raw_public_key))
     decrypted_payload = node_public_key.public_decrypt(Base64.decode64(payload["signature"]))
 
     decrypted_payload == digest(payload.except("signature"))
   end
+rescue OpenSSL::PKey::RSAError
+  false
 end
 
 def gossip
@@ -95,12 +105,12 @@ def gossip_payload
     "state" => $state,
   }
 
-  payload.merge("signature" => Base64.encode64($private_key.private_encrypt(digest(payload))))
+  payload.merge("signature" => Base64.encode64($key.private_encrypt(digest(payload))))
 end
 
-def update(params)
+def update
   # Update state of node for data that is older than what we currently have
-  params["state"].each do |public_key, payload|
+  @json_params["state"].each do |public_key, payload|
     $state[public_key] =
       if payload["version"] > ($state.dig(public_key, "version") || 0)
         payload
@@ -110,7 +120,7 @@ def update(params)
   end
 
   # Update peers, dedup and remove self
-  $peers = ($peers + params["peers"]).uniq - [settings.port]
+  $peers = ($peers + @json_params["peers"]).uniq - [settings.port]
 end
 
 def digest(state)
