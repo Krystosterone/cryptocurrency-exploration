@@ -11,3 +11,8 @@ gem "byebug"
 gem "concurrent-ruby"
 gem "httparty"
 gem "sinatra"
+
+group :test do
+  gem "rack-test"
+  gem "rspec"
+end
