@@ -82,27 +82,27 @@ end
 def gossip
   $peers.each do |peer|
     begin
-      response =
+    response =
         HTTParty.post(
-          "http://localhost:#{peer}/gossip",
-          {
-            body: gossip_payload.to_json,
-            headers: { "Content-Type" => "application/json" },
-          }
+            "http://localhost:#{peer}/gossip",
+            {
+                body: gossip_payload.to_json,
+                headers: { "Content-Type" => "application/json" },
+            }
         )
-      update(JSON.parse(response))
+    update(JSON.parse(response))
     rescue Errno::ECONNREFUSED
-      $peers.delete(peer)
-    end
+    $peers.delete(peer)
   end
+end
 end
 
 def gossip_payload
   payload = {
-    # Add self to peers
-    "peers" => $peers + [settings.port],
-    "public_key" => Base64.encode64($public_key),
-    "state" => $state,
+      # Add self to peers
+      "peers" => $peers + [settings.port],
+      "public_key" => Base64.encode64($public_key),
+      "state" => $state,
   }
 
   payload.merge("signature" => Base64.encode64($key.private_encrypt(digest(payload))))
@@ -112,11 +112,11 @@ def update
   # Update state of node for data that is older than what we currently have
   @json_params["state"].each do |public_key, payload|
     $state[public_key] =
-      if payload["version"] > ($state.dig(public_key, "version") || 0)
-        payload
-      else
-        $state[public_key]
-      end
+        if payload["version"] > ($state.dig(public_key, "version") || 0)
+          payload
+        else
+          $state[public_key]
+        end
   end
 
   # Update peers, dedup and remove self
